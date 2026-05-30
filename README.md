@@ -1,10 +1,8 @@
 # MindBridge
 
-Software-first assistive technology that maps wristband pressure micro-signals into commands for assistive devices.
+Intent translation platform for assistive technology — maps wristband pressure signals to device commands.
 
-## Quick start
-
-Double-click `start.bat` or:
+## Run
 
 ```bash
 cd app
@@ -12,57 +10,19 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 (Chrome or Edge recommended for hardware APIs).
+Open http://localhost:5173 in **Chrome or Edge** (required for BLE/Serial hardware).
 
-## Demo script
+## Quick start
 
-1. **Profiles** — activate "MS Demo User"
-2. **Devices** — select Simulator → enable **Auto-demo**
-3. **Dashboard** — watch raw + filtered signals, live preview driving the glove, and sent commands separately
-4. **Calibrate** — run wizard with live validation
-5. **Devices** — connect BLE wristband or Serial Arduino (see hardware below)
+1. **Input** — connect BLE wristband, serial device, or use the simulator
+2. **Calibrate** — new profile or recalibrate; confirm "Receiving sensor data"
+3. **Dashboard** — live preview + confirmed commands
+4. **Guide** — full operating instructions in the app
 
-## Hardware setup
-
-Emit one JSON object per line (BLE notification or Serial):
+## Hardware packet
 
 ```json
-{ "t": 1717000000, "sensors": [0.12, 0.08, 0.31, 0.05, 0.19, 0.11] }
+{"t":1717000000,"sensors":[0.12,0.08,0.31,0.05,0.19,0.11]}
 ```
 
-- **BLE:** MindBridge GATT service `12345678-1234-5678-1234-56789abcdef0` or Nordic UART (NUS)
-- **Serial:** 115200 baud, newline-delimited JSON
-
-Example Arduino loop:
-
-```cpp
-// sensors[] = 6 floats 0.0–1.0 from analog inputs
-Serial.print("{\"t\":");
-Serial.print(millis());
-Serial.print(",\"sensors\":[");
-for (int i = 0; i < 6; i++) {
-  if (i) Serial.print(',');
-  Serial.print(sensors[i], 3);
-}
-Serial.println("]}");
-```
-
-## Architecture
-
-```
-InputAdapter → Preprocessor → IntentEngine → OutputAdapter
-                    ↑              ↓
-              CalibrationProfile   Live preview + debounced send
-```
-
-- **Live preview:** glove follows detected intent every tick
-- **Command sent:** fires after stable match (debounced) — shown separately on dashboard
-- **Calibration:** samples processed through the same pipeline as runtime
-
-## Production build
-
-```bash
-cd app
-npm run build
-npm run serve
-```
+BLE: MindBridge GATT or Nordic UART · Serial: 115200 baud

@@ -35,33 +35,48 @@ export class InputManager {
     }
   }
 
-  async switchSource(source: InputSource): Promise<InputAdapter> {
-    if (this.active.connected && this.active !== this.getAdapter(source)) {
-      await this.active.disconnect();
-    }
-    this.source = source;
-    this.active = this.getAdapter(source);
-    if (!this.active.connected) {
-      await this.active.connect();
-    }
-    return this.active;
+  isHardwareConnected(): boolean {
+    return this.bluetooth.connected || this.serial.connected;
   }
 
-  async connectHardware(source: 'bluetooth' | 'serial'): Promise<InputAdapter> {
-    if (this.active.connected) {
-      await this.active.disconnect();
-    }
-    this.source = source;
-    this.active = this.getAdapter(source);
-    await this.active.connect();
-    return this.active;
+  /** Switch to simulator — disconnects hardware if needed */
+  async useSimulator(): Promise<SimulatorAdapter> {
+    if (this.bluetooth.connected) await this.bluetooth.disconnect().catch(() => {});
+    if (this.serial.connected) await this.serial.disconnect().catch(() => {});
+    this.source = 'simulator';
+    this.active = this.simulator;
+    if (!this.simulator.connected) await this.simulator.connect();
+    return this.simulator;
   }
 
-  async disconnectAll(): Promise<void> {
-    await Promise.all([
-      this.simulator.disconnect().catch(() => {}),
-      this.bluetooth.disconnect().catch(() => {}),
-      this.serial.disconnect().catch(() => {}),
-    ]);
+  async connectBluetooth(): Promise<BluetoothAdapter> {
+    if (this.simulator.connected) await this.simulator.disconnect().catch(() => {});
+    if (this.serial.connected) await this.serial.disconnect().catch(() => {});
+    this.source = 'bluetooth';
+    this.active = this.bluetooth;
+    await this.bluetooth.connect();
+    return this.bluetooth;
+  }
+
+  async connectSerial(): Promise<SerialAdapter> {
+    if (this.simulator.connected) await this.simulator.disconnect().catch(() => {});
+    if (this.bluetooth.connected) await this.bluetooth.disconnect().catch(() => {});
+    this.source = 'serial';
+    this.active = this.serial;
+    await this.serial.connect();
+    return this.serial;
+  }
+
+  async disconnectHardware(): Promise<void> {
+    await this.bluetooth.disconnect().catch(() => {});
+    await this.serial.disconnect().catch(() => {});
+  }
+
+  displayLabel(): string {
+    if (this.source === 'simulator') return 'Pressure Simulator';
+    if (this.source === 'bluetooth') {
+      return this.bluetooth.connected ? 'BLE Wristband' : 'BLE Wristband (disconnected)';
+    }
+    return this.serial.connected ? 'Serial Device' : 'Serial Device (disconnected)';
   }
 }

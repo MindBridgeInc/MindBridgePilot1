@@ -52,12 +52,13 @@ export class Pipeline {
   }
 
   async setInputAdapter(adapter: InputAdapter): Promise<void> {
-    if (this.input.connected) {
+    if (this.input !== adapter && this.input.connected) {
       await this.input.disconnect();
     }
     this.input = adapter;
     this.preprocessor.reset();
-    if (!adapter.connected) {
+    this.frameTimestamps = [];
+    if (adapter.id === 'simulator' && !adapter.connected) {
       await adapter.connect();
     }
   }
@@ -96,6 +97,13 @@ export class Pipeline {
     };
   }
 
+  /** True when sensor frames are arriving (any input source) */
+  isReceivingData(): boolean {
+    const last = this.frameTimestamps.at(-1);
+    if (!last) return false;
+    return Date.now() - last < 500;
+  }
+
   onUpdate(listener: PipelineListener): () => void {
     this.listeners.push(listener);
     return () => {
@@ -104,7 +112,9 @@ export class Pipeline {
   }
 
   async start(): Promise<void> {
-    if (!this.input.connected) await this.input.connect();
+    if (!this.input.connected && this.input.id === 'simulator') {
+      await this.input.connect();
+    }
     if (!this.output.connected) await this.output.connect();
     if (this.timer) return;
     this.timer = setInterval(() => this.tick(), TICK_MS);

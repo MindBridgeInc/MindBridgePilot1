@@ -2,7 +2,7 @@ import './styles/main.css';
 import { VirtualGloveAdapter } from './adapters/output/VirtualGloveAdapter';
 import { Pipeline } from './core/pipeline';
 import { InputManager } from './core/inputManager';
-import type { CalibrationProfile, InputSource } from './core/types';
+import type { CalibrationProfile } from './core/types';
 import {
   deleteProfile,
   ensureDefaultProfile,
@@ -39,23 +39,18 @@ const app = document.getElementById('app')!;
 app.innerHTML = `
   <header class="app-header">
     <div class="brand">
-      <span class="brand-mark">MB</span>
-      <div>
-        <h1>MindBridge</h1>
-        <p class="tagline">Intent translation for assistive technology</p>
-      </div>
+      <h1>MindBridge</h1>
     </div>
     <nav class="main-nav" id="main-nav">
-      <button data-view="dashboard" class="nav-btn active">Dashboard</button>
-      <button data-view="calibrate" class="nav-btn">Calibrate</button>
-      <button data-view="profiles" class="nav-btn">Profiles</button>
-      <button data-view="devices" class="nav-btn">Devices</button>
-      <button data-view="about" class="nav-btn">About</button>
+      <button type="button" data-view="dashboard" class="nav-btn active">Dashboard</button>
+      <button type="button" data-view="calibrate" class="nav-btn">Calibrate</button>
+      <button type="button" data-view="profiles" class="nav-btn">Profiles</button>
+      <button type="button" data-view="devices" class="nav-btn">Input</button>
+      <button type="button" data-view="about" class="nav-btn">Guide</button>
     </nav>
-    <div class="header-status">
-      <span class="status-dot" id="status-dot"></span>
-      <span id="header-profile">${activeProfile.name}</span>
-      <span id="header-input" class="header-input-label"></span>
+    <div class="header-meta">
+      <span class="meta-item"><span class="meta-label">Profile</span> <strong id="header-profile">${activeProfile.name}</strong></span>
+      <span class="meta-item"><span class="meta-label">Input</span> <strong id="header-input">—</strong></span>
     </div>
   </header>
   <main class="app-main" id="app-main">
@@ -86,6 +81,34 @@ function setView(view: View): void {
   ensureViewMounted(view);
 }
 
+function mountCalibrationWizard(): void {
+  calibrationWizard?.destroy();
+  calibrationWizard = new CalibrationWizard(
+    viewPanes.calibrate,
+    pipeline,
+    inputManager,
+    inputManager.simulator,
+    {
+      getActiveProfile: () => activeProfile,
+      onComplete: (profile) => {
+        activeProfile = profile;
+        pipeline.setProfile(profile);
+        settings.activeProfileId = profile.id;
+        saveSettings(settings);
+        updateHeader();
+      },
+      onInputWarning: (msg) => {
+        console.warn(msg);
+      },
+    }
+  );
+}
+
+function mountCalibrationForProfile(profile: CalibrationProfile): void {
+  mountCalibrationWizard();
+  calibrationWizard?.startRecalibrate(profile);
+}
+
 function ensureViewMounted(view: View): void {
   switch (view) {
     case 'dashboard':
@@ -94,23 +117,11 @@ function ensureViewMounted(view: View): void {
           glove.setContainer(container);
           glove.renderDom();
         });
-        dashboard.update(pipeline.getState(), pipeline.getCommandLog(), activeProfile, pipeline.getInputMetrics());
       }
+      dashboard.update(pipeline.getState(), pipeline.getCommandLog(), activeProfile, pipeline.getInputMetrics());
       break;
     case 'calibrate':
-      calibrationWizard?.destroy();
-      calibrationWizard = new CalibrationWizard(
-        viewPanes.calibrate,
-        pipeline,
-        inputManager.simulator,
-        (profile) => {
-          activeProfile = profile;
-          pipeline.setProfile(profile);
-          settings.activeProfileId = profile.id;
-          saveSettings(settings);
-          updateHeader();
-        }
-      );
+      mountCalibrationWizard();
       break;
     case 'profiles':
       renderProfiles(viewPanes.profiles);
@@ -128,14 +139,49 @@ function ensureViewMounted(view: View): void {
               settings = { ...settings, [key]: value };
               saveSettings(settings);
             },
-            onInputSourceChange: (source) => void switchInputSource(source),
-            onConnectBle: () => connectHardware('bluetooth'),
-            onConnectSerial: () => connectHardware('serial'),
-            onDisconnectHardware: () => disconnectHardware(),
+            onUseSimulator: async () => {
+              const adapter = await inputManager.useSimulator();
+              await pipeline.setInputAdapter(adapter);
+              settings.inputSource = 'simulator';
+              inputManager.simulator.setAutoDemo(settings.autoDemo);
+              inputManager.simulator.setNoiseInjection(settings.noiseInjection);
+              saveSettings(settings);
+              devicePanel?.updateSource('simulator');
+              updateHeader();
+            },
+            onConnectBle: async () => {
+              inputManager.simulator.setAutoDemo(false);
+              const adapter = await inputManager.connectBluetooth();
+              await pipeline.setInputAdapter(adapter);
+              settings.inputSource = 'bluetooth';
+              saveSettings(settings);
+              devicePanel?.updateSource('bluetooth');
+              devicePanel?.setError('');
+              updateHeader();
+            },
+            onConnectSerial: async () => {
+              inputManager.simulator.setAutoDemo(false);
+              const adapter = await inputManager.connectSerial();
+              await pipeline.setInputAdapter(adapter);
+              settings.inputSource = 'serial';
+              saveSettings(settings);
+              devicePanel?.updateSource('serial');
+              devicePanel?.setError('');
+              updateHeader();
+            },
+            onDisconnectHardware: async () => {
+              await inputManager.disconnectHardware();
+              const adapter = await inputManager.useSimulator();
+              await pipeline.setInputAdapter(adapter);
+              settings.inputSource = 'simulator';
+              saveSettings(settings);
+              devicePanel?.updateSource('simulator');
+              updateHeader();
+            },
           }
         );
       } else {
-        devicePanel.updateSource(settings.inputSource);
+        devicePanel.refresh();
       }
       devicePanel.setInputMetrics(pipeline.getInputMetrics());
       break;
@@ -145,79 +191,60 @@ function ensureViewMounted(view: View): void {
   }
 }
 
-async function switchInputSource(source: InputSource): Promise<void> {
-  settings.inputSource = source;
-  saveSettings(settings);
-
-  if (source === 'simulator') {
-    await disconnectHardware();
-    await pipeline.setInputAdapter(inputManager.simulator);
-    inputManager.simulator.setAutoDemo(settings.autoDemo);
-    inputManager.simulator.setNoiseInjection(settings.noiseInjection);
-  }
-
-  devicePanel?.updateSource(source);
-  updateHeader();
-}
-
-async function connectHardware(source: 'bluetooth' | 'serial'): Promise<void> {
-  try {
-    inputManager.simulator.setAutoDemo(false);
-    const adapter = await inputManager.connectHardware(source);
-    await pipeline.setInputAdapter(adapter);
-    settings.inputSource = source;
-    saveSettings(settings);
-    updateHeader();
-  } catch (err) {
-    alert(err instanceof Error ? err.message : 'Connection failed');
-  }
-}
-
-async function disconnectHardware(): Promise<void> {
-  await inputManager.bluetooth.disconnect().catch(() => {});
-  await inputManager.serial.disconnect().catch(() => {});
-  if (settings.inputSource === 'simulator') {
-    await pipeline.setInputAdapter(inputManager.simulator);
-  }
-  updateHeader();
-}
-
 function renderProfiles(root: HTMLElement): void {
   const profiles = loadProfiles();
   root.innerHTML = `
-    <div class="profiles-layout">
-      <section class="panel">
-        <h2>User Profiles</h2>
-        <p class="hint">Each profile stores baseline, gain, and trained command templates for a specific user.</p>
-        <ul class="profile-list">
-          ${profiles
-            .map(
-              (p) => `
-            <li class="profile-item ${p.id === activeProfile.id ? 'active' : ''}">
-              <div>
-                <strong>${p.name}</strong>
-                <span>Gain ${p.gain.toFixed(2)}× · Updated ${new Date(p.updatedAt).toLocaleDateString()}</span>
-              </div>
-              <div class="profile-actions">
-                <button class="btn btn-secondary btn-sm" data-select="${p.id}">Activate</button>
-                <button class="btn btn-danger btn-sm" data-delete="${p.id}">Delete</button>
-              </div>
-            </li>
-          `
-            )
-            .join('')}
-        </ul>
-        <button class="btn btn-primary" id="create-demo-profile">Create demo profile</button>
-      </section>
-    </div>
+    <section class="panel profiles-panel">
+      <h2>Profiles</h2>
+      <p class="lead">Each profile stores a rest baseline and trained gestures for one user. Switch profiles when a different person uses MindBridge.</p>
+      <ul class="profile-list">
+        ${profiles
+          .map((p) => {
+            const isActive = p.id === activeProfile.id;
+            const trained = p.commands.filter((c) => c.id !== 'rest' && c.samples.length > 0).length;
+            return `
+          <li class="profile-item ${isActive ? 'active' : ''}">
+            <div class="profile-info">
+              <strong>${p.name}</strong>
+              ${isActive ? '<span class="profile-badge">Active</span>' : ''}
+              <span class="profile-detail">Gain ${p.gain.toFixed(1)}× · ${trained} gestures · ${new Date(p.updatedAt).toLocaleDateString()}</span>
+            </div>
+            <div class="profile-actions">
+              ${!isActive ? `<button type="button" class="btn btn-secondary btn-sm" data-select="${p.id}">Activate</button>` : ''}
+              <button type="button" class="btn btn-secondary btn-sm" data-recal="${p.id}">Recalibrate</button>
+              <button type="button" class="btn btn-danger btn-sm" data-delete="${p.id}">Delete</button>
+            </div>
+          </li>`;
+          })
+          .join('')}
+      </ul>
+      <div class="wizard-actions">
+        <button type="button" class="btn btn-primary" id="new-calibration">New calibration</button>
+        <button type="button" class="btn btn-secondary" id="create-demo-profile">Add demo profile</button>
+      </div>
+    </section>
   `;
 
   root.querySelectorAll('[data-select]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = (btn as HTMLElement).dataset.select!;
       const profile = loadProfiles().find((p) => p.id === id);
-      if (profile) activateProfile(profile);
-      renderProfiles(root);
+      if (profile) {
+        activateProfile(profile);
+        renderProfiles(root);
+      }
+    });
+  });
+
+  root.querySelectorAll('[data-recal]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = (btn as HTMLElement).dataset.recal!;
+      const profile = loadProfiles().find((p) => p.id === id);
+      if (profile) {
+        activateProfile(profile);
+        setView('calibrate');
+        mountCalibrationForProfile(profile);
+      }
     });
   });
 
@@ -225,17 +252,19 @@ function renderProfiles(root: HTMLElement): void {
     btn.addEventListener('click', () => {
       const id = (btn as HTMLElement).dataset.delete!;
       if (loadProfiles().length <= 1) {
-        alert('Keep at least one profile.');
+        alert('At least one profile must remain.');
         return;
       }
+      if (!confirm('Delete this profile?')) return;
       deleteProfile(id);
       if (activeProfile.id === id) activateProfile(ensureDefaultProfile());
       renderProfiles(root);
     });
   });
 
+  root.querySelector('#new-calibration')?.addEventListener('click', () => setView('calibrate'));
   root.querySelector('#create-demo-profile')?.addEventListener('click', () => {
-    const profile = createDefaultProfile(`Profile ${loadProfiles().length + 1}`);
+    const profile = createDefaultProfile(`Demo ${loadProfiles().length + 1}`);
     upsertProfile(profile);
     activateProfile(profile);
     renderProfiles(root);
@@ -244,20 +273,53 @@ function renderProfiles(root: HTMLElement): void {
 
 function renderAbout(root: HTMLElement): void {
   root.innerHTML = `
-    <article class="about panel">
-      <h2>About MindBridge</h2>
-      <p>MindBridge maps wristband pressure micro-signals into commands for assistive devices — a universal compatibility layer between human intent and hardware.</p>
-      <h3>Hardware setup</h3>
-      <p>Firmware should emit one JSON line per reading:</p>
-      <code>{ "t": 1717000000, "sensors": [0.12, 0.08, 0.31, 0.05, 0.19, 0.11] }</code>
-      <p>BLE: MindBridge GATT service or Nordic UART. Serial: 115200 baud.</p>
-      <h3>Demo script</h3>
-      <ol>
-        <li>Activate a profile under Profiles</li>
-        <li>Devices → enable Auto-demo → Dashboard</li>
-        <li>Watch live preview drive the glove; sent commands appear separately</li>
-        <li>Calibrate → validate → save a custom profile</li>
-      </ol>
+    <article class="guide panel">
+      <h2>Operating MindBridge</h2>
+      <p class="lead">MindBridge reads pressure from a wristband, interprets your intended hand gesture, and sends commands to an assistive device (shown here as a virtual glove).</p>
+
+      <section class="guide-section">
+        <h3>1. Connect input</h3>
+        <p>Go to <strong>Input</strong> and choose your source:</p>
+        <ul>
+          <li><strong>Pressure Simulator</strong> — for testing without hardware. Enable auto-demo to cycle gestures automatically.</li>
+          <li><strong>BLE Wristband</strong> — pair via Web Bluetooth (Chrome/Edge). Firmware must broadcast JSON sensor packets.</li>
+          <li><strong>Serial / USB</strong> — connect an Arduino or similar at 115200 baud.</li>
+        </ul>
+        <p>Confirm <em>Data flowing</em> appears before calibrating.</p>
+      </section>
+
+      <section class="guide-section">
+        <h3>2. Calibrate</h3>
+        <ol>
+          <li>Open <strong>Calibrate</strong> → start a new profile or recalibrate an existing one.</li>
+          <li><strong>Rest baseline</strong> — relax your hand for 6 seconds.</li>
+          <li><strong>Train</strong> — hold each gesture (open hand, close hand, pinch) for 4 seconds while recording.</li>
+          <li><strong>Verify</strong> — perform each gesture naturally; MindBridge scores recognition quality.</li>
+        </ol>
+        <p>Recalibrate whenever symptoms change or recognition drifts. Use Profiles → Recalibrate on any saved profile.</p>
+      </section>
+
+      <section class="guide-section">
+        <h3>3. Operate</h3>
+        <p>On the <strong>Dashboard</strong>:</p>
+        <ul>
+          <li><strong>Live preview</strong> — what MindBridge thinks you intend right now (drives the glove animation).</li>
+          <li><strong>Command sent</strong> — a confirmed command after a stable match (debounced, sent to the assistive device).</li>
+          <li>Raw and filtered sensor charts show what the algorithm sees.</li>
+        </ul>
+      </section>
+
+      <section class="guide-section">
+        <h3>4. Firmware packet format</h3>
+        <p>Send one JSON object per line. Six sensor values, each 0.0–1.0:</p>
+        <pre class="code-block">{"t":1717000000,"sensors":[0.12,0.08,0.31,0.05,0.19,0.11]}</pre>
+        <p>BLE: MindBridge GATT service or Nordic UART. Serial: 115200 baud, newline-delimited.</p>
+      </section>
+
+      <section class="guide-section">
+        <h3>5. Profiles</h3>
+        <p>Each user needs their own profile. Activate the correct profile before a session. Demo profiles use pre-recorded patterns for presentations only.</p>
+      </section>
     </article>
   `;
 }
@@ -274,11 +336,7 @@ function updateHeader(): void {
   const profileEl = document.getElementById('header-profile');
   if (profileEl) profileEl.textContent = activeProfile.name;
   const inputEl = document.getElementById('header-input');
-  if (inputEl) inputEl.textContent = pipeline.getInputMetrics().sourceLabel;
-  const dot = document.getElementById('status-dot');
-  if (dot) {
-    dot.className = `status-dot ${pipeline.getInputMetrics().connected ? 'online' : ''}`;
-  }
+  if (inputEl) inputEl.textContent = inputManager.displayLabel();
 }
 
 document.getElementById('main-nav')!.addEventListener('click', (e) => {
@@ -287,17 +345,28 @@ document.getElementById('main-nav')!.addEventListener('click', (e) => {
   setView(btn.dataset.view as View);
 });
 
+inputManager.bluetooth.setOnDisconnect(async () => {
+  if (settings.inputSource === 'bluetooth') {
+    await inputManager.useSimulator();
+    await pipeline.setInputAdapter(inputManager.simulator);
+    settings.inputSource = 'simulator';
+    saveSettings(settings);
+    devicePanel?.updateSource('simulator');
+    updateHeader();
+  }
+});
+
 inputManager.simulator.setAutoDemo(settings.autoDemo);
 inputManager.simulator.setNoiseInjection(settings.noiseInjection);
 
-pipeline.onUpdate((state, _events) => {
+pipeline.onUpdate((state) => {
   const metrics = pipeline.getInputMetrics();
   if (dashboard) {
     dashboard.update(state, pipeline.getCommandLog(), activeProfile, metrics);
   }
   if (devicePanel && currentView === 'devices') {
     devicePanel.setInputMetrics(metrics);
-    if (inputManager.simulator.isAutoDemo() && settings.inputSource === 'simulator') {
+    if (inputManager.getSource() === 'simulator' && inputManager.simulator.isAutoDemo()) {
       devicePanel.refreshSliders();
     }
   }
@@ -305,10 +374,10 @@ pipeline.onUpdate((state, _events) => {
 });
 
 async function init(): Promise<void> {
-  if (settings.inputSource === 'simulator') {
-    await pipeline.setInputAdapter(inputManager.simulator);
-  }
+  await inputManager.useSimulator();
+  await pipeline.setInputAdapter(inputManager.simulator);
   await pipeline.start();
+  updateHeader();
   setView('dashboard');
 }
 

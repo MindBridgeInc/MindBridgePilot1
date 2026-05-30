@@ -2,11 +2,8 @@ import type { InputAdapter } from './InputAdapter';
 import type { SensorFrame } from '../../core/types';
 import { parseBluetoothPacket } from './packetParser';
 
-/** MindBridge custom GATT service — configure firmware to match */
 export const MINDBRIDGE_SERVICE_UUID = '12345678-1234-5678-1234-56789abcdef0';
 export const MINDBRIDGE_SENSOR_CHAR_UUID = '12345678-1234-5678-1234-56789abcdef1';
-
-/** Nordic UART Service — common on ESP32 / nRF52 Arduino sketches */
 export const NUS_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 export const NUS_RX_CHAR_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
@@ -19,9 +16,15 @@ export class BluetoothAdapter implements InputAdapter {
 
   private device: BluetoothDevice | null = null;
   private latestFrame: SensorFrame | null = null;
+  private lineBuffer = '';
   private lastPacketLine = '';
   private packetListeners: PacketListener[] = [];
   private useNus = false;
+  private onDisconnect: (() => void) | null = null;
+
+  setOnDisconnect(cb: () => void): void {
+    this.onDisconnect = cb;
+  }
 
   onPacket(listener: PacketListener): () => void {
     this.packetListeners.push(listener);
@@ -36,7 +39,7 @@ export class BluetoothAdapter implements InputAdapter {
 
   async connect(): Promise<void> {
     if (!('bluetooth' in navigator)) {
-      throw new Error('Web Bluetooth is not supported. Use Chrome/Edge on desktop.');
+      throw new Error('Web Bluetooth requires Chrome or Edge on desktop.');
     }
 
     const device = await navigator.bluetooth.requestDevice({
@@ -47,12 +50,13 @@ export class BluetoothAdapter implements InputAdapter {
     this.device = device;
     device.addEventListener('gattserverdisconnected', () => {
       this.connected = false;
+      this.onDisconnect?.();
     });
 
     const server = await device.gatt?.connect();
-    if (!server) throw new Error('Failed to connect to GATT server.');
+    if (!server) throw new Error('Could not connect to the BLE device.');
 
-    let characteristic: BluetoothRemoteGATTCharacteristic | null = null;
+    let characteristic: BluetoothRemoteGATTCharacteristic;
 
     try {
       const service = await server.getPrimaryService(MINDBRIDGE_SERVICE_UUID);
@@ -67,11 +71,12 @@ export class BluetoothAdapter implements InputAdapter {
     await characteristic.startNotifications();
     characteristic.addEventListener('characteristicvaluechanged', (event) => {
       const target = event.target as BluetoothRemoteGATTCharacteristic;
-      const text = new TextDecoder().decode(target.value);
-      this.handleIncomingText(text);
+      if (!target.value) return;
+      this.handleIncomingText(new TextDecoder().decode(target.value));
     });
 
     this.connected = true;
+    this.lineBuffer = '';
   }
 
   async disconnect(): Promise<void> {
@@ -81,6 +86,7 @@ export class BluetoothAdapter implements InputAdapter {
     this.connected = false;
     this.device = null;
     this.latestFrame = null;
+    this.lineBuffer = '';
   }
 
   read(): SensorFrame | null {
@@ -90,15 +96,32 @@ export class BluetoothAdapter implements InputAdapter {
   getStatus(): string {
     if (!this.connected) return 'Not connected';
     const name = this.device?.name ?? 'BLE device';
-    return `Connected — ${name}${this.useNus ? ' (NUS)' : ''}`;
+    return `${name}${this.useNus ? ' · Nordic UART' : ' · MindBridge GATT'}`;
   }
 
   private handleIncomingText(text: string): void {
-    this.lastPacketLine = text.trim();
-    for (const listener of this.packetListeners) {
-      listener(this.lastPacketLine);
+    this.lineBuffer += text;
+    const lines = this.lineBuffer.split(/\r?\n/);
+    this.lineBuffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      this.lastPacketLine = trimmed;
+      for (const listener of this.packetListeners) {
+        listener(trimmed);
+      }
+      const frame = parseBluetoothPacket(trimmed);
+      if (frame) this.latestFrame = frame;
     }
-    const frame = parseBluetoothPacket(this.lastPacketLine);
-    if (frame) this.latestFrame = frame;
+
+    const partial = this.lineBuffer.trim();
+    if (partial.startsWith('{') && partial.endsWith('}')) {
+      const frame = parseBluetoothPacket(partial);
+      if (frame) {
+        this.latestFrame = frame;
+        this.lastPacketLine = partial;
+      }
+    }
   }
 }

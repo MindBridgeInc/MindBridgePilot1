@@ -7,7 +7,7 @@ import type { InputMetrics } from '../core/types';
 
 export interface DevicePanelCallbacks {
   onSettingsChange: (key: string, value: boolean) => void;
-  onInputSourceChange: (source: InputSource) => void;
+  onUseSimulator: () => Promise<void>;
   onConnectBle: () => Promise<void>;
   onConnectSerial: () => Promise<void>;
   onDisconnectHardware: () => Promise<void>;
@@ -21,7 +21,14 @@ export class DevicePanel {
   private callbacks: DevicePanelCallbacks;
   private inputSource: InputSource;
   private lastPacket = '';
-  private inputMetrics: InputMetrics;
+  private errorMessage = '';
+  private inputMetrics: InputMetrics = {
+    framesPerSecond: 0,
+    lastFrameAt: null,
+    connected: false,
+    sourceLabel: '',
+    status: '',
+  };
 
   constructor(
     root: HTMLElement,
@@ -37,13 +44,6 @@ export class DevicePanel {
     this.serial = serial;
     this.inputSource = inputSource;
     this.callbacks = callbacks;
-    this.inputMetrics = {
-      framesPerSecond: 0,
-      lastFrameAt: null,
-      connected: false,
-      sourceLabel: '',
-      status: '',
-    };
 
     bluetooth.onPacket((line) => {
       this.lastPacket = line;
@@ -59,53 +59,77 @@ export class DevicePanel {
 
   setInputMetrics(metrics: InputMetrics): void {
     this.inputMetrics = metrics;
-    const el = this.root.querySelector('#input-status-live');
-    if (el) {
-      el.innerHTML = `
-        <span class="badge ${metrics.connected ? 'badge-active' : ''}">${metrics.sourceLabel}</span>
-        <span>${metrics.status}</span>
-        <span>${metrics.framesPerSecond} Hz</span>
-      `;
-    }
+    this.refreshStatusBar();
+  }
+
+  setError(message: string): void {
+    this.errorMessage = message;
+    const el = this.root.querySelector('#device-error');
+    if (el) el.textContent = message;
+  }
+
+  refresh(): void {
+    this.render();
   }
 
   private render(): void {
     const values = this.simulator.getValues();
-    const isSimulator = this.inputSource === 'simulator';
-    const hwConnected = this.bluetooth.connected || this.serial.connected;
+    const isSim = this.inputSource === 'simulator';
+    const bleOn = this.bluetooth.connected;
+    const serialOn = this.serial.connected;
 
     this.root.innerHTML = `
       <div class="devices-layout">
         <section class="panel">
-          <h2>Input Source</h2>
-          <div class="source-selector">
-            <label class="source-option ${isSimulator ? 'active' : ''}">
-              <input type="radio" name="input-source" value="simulator" ${isSimulator ? 'checked' : ''} />
-              <span>Pressure Simulator</span>
-            </label>
-            <label class="source-option ${this.inputSource === 'bluetooth' ? 'active' : ''}">
-              <input type="radio" name="input-source" value="bluetooth" ${this.inputSource === 'bluetooth' ? 'checked' : ''} />
-              <span>BLE Wristband</span>
-            </label>
-            <label class="source-option ${this.inputSource === 'serial' ? 'active' : ''}">
-              <input type="radio" name="input-source" value="serial" ${this.inputSource === 'serial' ? 'checked' : ''} />
-              <span>Serial / Arduino</span>
-            </label>
+          <h2>Input source</h2>
+          <p class="lead">Choose where pressure readings come from. Use Chrome or Edge for hardware connections.</p>
+          <div id="device-error" class="device-error">${this.errorMessage}</div>
+          <div class="source-cards">
+            <article class="source-card ${isSim ? 'selected' : ''}">
+              <header>
+                <h3>Pressure Simulator</h3>
+                <span class="source-tag">Testing</span>
+              </header>
+              <p>For demos and development. Sliders or auto-demo generate synthetic sensor data.</p>
+              <button type="button" class="btn ${isSim ? 'btn-primary' : 'btn-secondary'}" id="use-simulator" ${isSim ? 'disabled' : ''}>
+                ${isSim ? 'Active' : 'Use simulator'}
+              </button>
+            </article>
+            <article class="source-card ${this.inputSource === 'bluetooth' ? 'selected' : ''}">
+              <header>
+                <h3>BLE Wristband</h3>
+                <span class="source-tag">Production</span>
+              </header>
+              <p>Web Bluetooth. Supports MindBridge GATT or Nordic UART (NUS) firmware.</p>
+              <p class="source-status">${this.bluetooth.getStatus()}</p>
+              <button type="button" class="btn btn-primary" id="connect-ble" ${bleOn ? 'disabled' : ''}>Connect BLE device</button>
+              ${bleOn ? '<button type="button" class="btn btn-secondary btn-sm" id="disconnect-ble">Disconnect</button>' : ''}
+            </article>
+            <article class="source-card ${this.inputSource === 'serial' ? 'selected' : ''}">
+              <header>
+                <h3>Serial / USB</h3>
+                <span class="source-tag">Production</span>
+              </header>
+              <p>Web Serial at 115200 baud. One JSON object per line from Arduino or similar.</p>
+              <p class="source-status">${this.serial.getStatus()}</p>
+              <button type="button" class="btn btn-primary" id="connect-serial" ${serialOn ? 'disabled' : ''}>Connect serial port</button>
+              ${serialOn ? '<button type="button" class="btn btn-secondary btn-sm" id="disconnect-serial">Disconnect</button>' : ''}
+            </article>
           </div>
           <div class="input-status-live" id="input-status-live"></div>
         </section>
 
-        <section class="panel ${isSimulator ? '' : 'panel-disabled'}">
-          <h2>Pressure Simulator</h2>
-          <p class="hint">Stand-in for the MindBridge wristband. Disabled when hardware input is active.</p>
+        <section class="panel ${isSim ? '' : 'panel-muted'}">
+          <h2>Simulator controls</h2>
+          <p class="hint">${isSim ? 'Adjust channels manually or enable auto-demo.' : 'Switch to the simulator to use these controls.'}</p>
           <div class="toggle-row">
             <label class="toggle">
-              <input type="checkbox" id="auto-demo" ${this.simulator.isAutoDemo() ? 'checked' : ''} ${isSimulator ? '' : 'disabled'} />
-              <span>Auto-demo mode (MS-like variability)</span>
+              <input type="checkbox" id="auto-demo" ${this.simulator.isAutoDemo() ? 'checked' : ''} ${isSim ? '' : 'disabled'} />
+              <span>Auto-demo (cycles through gestures)</span>
             </label>
             <label class="toggle">
-              <input type="checkbox" id="noise-injection" ${this.simulator.isNoiseInjection() ? 'checked' : ''} ${isSimulator ? '' : 'disabled'} />
-              <span>Inject noise (test filtering)</span>
+              <input type="checkbox" id="noise-injection" ${this.simulator.isNoiseInjection() ? 'checked' : ''} ${isSim ? '' : 'disabled'} />
+              <span>Add noise (stress-test filtering)</span>
             </label>
           </div>
           <div class="slider-grid" id="slider-grid">
@@ -113,8 +137,8 @@ export class DevicePanel {
               .map(
                 (v, i) => `
               <label class="slider-field">
-                <span>Sensor ${i + 1}</span>
-                <input type="range" min="0" max="100" value="${Math.round(v * 100)}" data-index="${i}" ${isSimulator ? '' : 'disabled'} />
+                <span>Ch ${i + 1}</span>
+                <input type="range" min="0" max="100" value="${Math.round(v * 100)}" data-index="${i}" ${isSim ? '' : 'disabled'} />
                 <output>${Math.round(v * 100)}%</output>
               </label>
             `
@@ -124,45 +148,42 @@ export class DevicePanel {
         </section>
 
         <section class="panel">
-          <h2>Hardware Connection</h2>
-          <p class="hint">Connect a wristband transmitting newline-delimited JSON packets.</p>
-          <div class="adapter-cards">
-            <div class="adapter-card">
-              <h3>BLE Wristband</h3>
-              <p>${this.bluetooth.getStatus()}</p>
-              <code>{ "t": 1717000000, "sensors": [0.12, 0.08, 0.31, 0.05, 0.19, 0.11] }</code>
-              <p class="hint">Service UUID: MindBridge custom or Nordic UART (NUS)</p>
-              <button class="btn btn-primary" id="connect-ble" ${this.bluetooth.connected ? 'disabled' : ''}>Connect BLE</button>
-            </div>
-            <div class="adapter-card">
-              <h3>Serial / Arduino</h3>
-              <p>${this.serial.getStatus()}</p>
-              <code>{ "t": 1717000000, "sensors": [0.12, 0.08, 0.31, 0.05, 0.19, 0.11] }</code>
-              <p class="hint">115200 baud, one JSON object per line</p>
-              <button class="btn btn-primary" id="connect-serial" ${this.serial.connected ? 'disabled' : ''}>Connect Serial</button>
-            </div>
-          </div>
-          ${hwConnected ? '<button class="btn btn-secondary" id="disconnect-hw">Disconnect hardware</button>' : ''}
-          <div class="packet-inspector">
-            <h3>Last packet</h3>
-            <pre id="packet-log">${this.lastPacket || 'No packets received yet'}</pre>
-          </div>
+          <h2>Packet format</h2>
+          <p class="hint">Firmware must send one JSON line per reading, values 0.0–1.0:</p>
+          <pre class="code-block">{"t":1717000000,"sensors":[0.12,0.08,0.31,0.05,0.19,0.11]}</pre>
+          <h3>Last received packet</h3>
+          <pre class="code-block" id="packet-log">${this.lastPacket || '—'}</pre>
         </section>
       </div>
     `;
 
     this.bindEvents();
-    this.setInputMetrics(this.inputMetrics);
+    this.refreshStatusBar();
   }
 
   private bindEvents(): void {
-    this.root.querySelectorAll<HTMLInputElement>('input[name="input-source"]').forEach((radio) => {
-      radio.addEventListener('change', () => {
-        if (radio.checked) {
-          this.inputSource = radio.value as InputSource;
-          this.callbacks.onInputSourceChange(this.inputSource);
-        }
+    this.root.querySelector('#use-simulator')?.addEventListener('click', () => {
+      void this.callbacks.onUseSimulator().then(() => this.render());
+    });
+
+    this.root.querySelector('#connect-ble')?.addEventListener('click', () => {
+      void this.callbacks.onConnectBle().then(() => this.render()).catch((e) => {
+        this.setError(e instanceof Error ? e.message : 'BLE connection failed');
       });
+    });
+
+    this.root.querySelector('#connect-serial')?.addEventListener('click', () => {
+      void this.callbacks.onConnectSerial().then(() => this.render()).catch((e) => {
+        this.setError(e instanceof Error ? e.message : 'Serial connection failed');
+      });
+    });
+
+    this.root.querySelector('#disconnect-ble')?.addEventListener('click', () => {
+      void this.callbacks.onDisconnectHardware().then(() => this.render());
+    });
+
+    this.root.querySelector('#disconnect-serial')?.addEventListener('click', () => {
+      void this.callbacks.onDisconnectHardware().then(() => this.render());
     });
 
     this.root.querySelector('#auto-demo')?.addEventListener('change', (e) => {
@@ -177,22 +198,9 @@ export class DevicePanel {
       this.callbacks.onSettingsChange('noiseInjection', checked);
     });
 
-    this.root.querySelector('#connect-ble')?.addEventListener('click', () => {
-      void this.callbacks.onConnectBle().then(() => this.render());
-    });
-
-    this.root.querySelector('#connect-serial')?.addEventListener('click', () => {
-      void this.callbacks.onConnectSerial().then(() => this.render());
-    });
-
-    this.root.querySelector('#disconnect-hw')?.addEventListener('click', () => {
-      void this.callbacks.onDisconnectHardware().then(() => this.render());
-    });
-
     this.root.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach((slider) => {
       slider.addEventListener('input', () => {
-        const index = Number(slider.dataset.index);
-        this.simulator.setSlider(index, Number(slider.value) / 100);
+        this.simulator.setSlider(Number(slider.dataset.index), Number(slider.value) / 100);
         const output = slider.nextElementSibling;
         if (output) output.textContent = `${slider.value}%`;
       });
@@ -212,9 +220,23 @@ export class DevicePanel {
     });
   }
 
+  private refreshStatusBar(): void {
+    const el = this.root.querySelector('#input-status-live');
+    if (!el) return;
+    const m = this.inputMetrics;
+    el.innerHTML = `
+      <span>${m.sourceLabel}</span>
+      <span>${m.status}</span>
+      <span>${m.framesPerSecond} Hz</span>
+      <span class="${m.lastFrameAt && Date.now() - m.lastFrameAt < 500 ? 'status-ok' : 'status-warn'}">
+        ${m.lastFrameAt && Date.now() - m.lastFrameAt < 500 ? 'Data flowing' : 'No recent data'}
+      </span>
+    `;
+  }
+
   private refreshPacketLog(): void {
     const el = this.root.querySelector('#packet-log');
-    if (el) el.textContent = this.lastPacket || 'No packets received yet';
+    if (el) el.textContent = this.lastPacket || '—';
   }
 
   updateSource(source: InputSource): void {
